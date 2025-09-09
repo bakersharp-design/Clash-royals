@@ -1,0 +1,436 @@
+<script>
+const game = document.getElementById("game");
+const elixirBar = document.getElementById("elixirFill");
+
+const SPRITES = {
+  tank: 'https://i.imgur.com/cHidSVu.png',
+  knight: 'https://i.imgur.com/3VjK0lA.png',
+  archer: 'https://i.imgur.com/Mn84lJj.png'
+};
+
+const UNIT_TYPES = {
+  tank: { speed: 0.3, hp: 100, damage: 0.2, cost: 5, cooldown: 3000, sprite: SPRITES.tank },
+  knight: { speed: 0.6, hp: 60, damage: 0.5, cost: 3, cooldown: 3000, sprite: SPRITES.knight },
+  archer: { speed: 1.2, hp: 30, damage: 0.3, cost: 2, cooldown: 3000, sprite: SPRITES.archer, ranged: true }
+};
+
+const SPELLS = {
+  fireball: { cost: 4, cooldown: 4000, radius: 60, damage: 50 },
+  freeze: { cost: 3, cooldown: 6000, radius: 60, duration: 2000 }
+};
+
+const buttons = {
+  tank: document.getElementById("btnTank"),
+  knight: document.getElementById("btnKnight"),
+  archer: document.getElementById("btnArcher"),
+  fireball: document.getElementById("btnFireball"),
+  freeze: document.getElementById("btnFreeze")
+};
+
+const cooldowns = {
+  tank: 0,
+  knight: 0,
+  archer: 0,
+  fireball: 0,
+  freeze: 0
+};
+
+const cooldownOverlays = {};
+for (const key in buttons) {
+  cooldownOverlays[key] = buttons[key].querySelector(".cooldown-overlay");
+}
+
+const towers = [];
+const units = [];
+let elixir = 5;
+const maxElixir = 10;
+
+let selectedUnitToPlace = null;
+let selectedSpell = null;
+
+const placementPreview = document.createElement("div");
+placementPreview.id = "placementPreview";
+game.appendChild(placementPreview);
+placementPreview.style.display = "none";
+
+createTower(50, 560, false);
+createTower(180, 560, false);
+createTower(50, 10, true);
+createTower(180, 10, true);
+
+function createTower(x, y, isEnemy = false) {
+  const tower = document.createElement("div");
+  tower.className = "tower";
+  tower.style.left = `${x}px`;
+  tower.style.top = `${y}px`;
+  const healthBar = document.createElement("div");
+  healthBar.className = "health-bar";
+  tower.appendChild(healthBar);
+  game.appendChild(tower);
+  towers.push({ el: tower, healthBar, hp: 100, isEnemy, x, y, lastHitFlash: 0 });
+}
+
+function spawnUnit(laneIndex, type, isEnemy = false) {
+  const def = UNIT_TYPES[type];
+  const x = laneIndex === 0 ? 50 : 180;
+  const y = isEnemy ? 40 : 540;
+
+  const wrapper = document.createElement("div");
+  wrapper.className = "unit-wrapper";
+  wrapper.style.left = `${x}px`;
+  wrapper.style.top = `${y}px`;
+
+  const unit = document.createElement("div");
+  unit.className = "unit" + (isEnemy ? " enemy" : "");
+  unit.style.backgroundImage = `url(${def.sprite})`;
+
+  wrapper.appendChild(unit);
+
+  const hpBar = document.createElement("div");
+  hpBar.className = "health-bar";
+  wrapper.appendChild(hpBar);
+
+  game.appendChild(wrapper);
+
+  units.push({
+    type,
+    x,
+    y,
+    speed: isEnemy ? def.speed : -def.speed,
+    hp: def.hp,
+    maxHp: def.hp,
+    damage: def.damage,
+    el: unit,
+    hpBar,
+    wrapper,
+    isEnemy,
+    lane: laneIndex,
+    frozenUntil: 0,
+    dying: false,
+    lastAttackTime: 0
+  });
+}
+
+function updateElixirBar() {
+  elixirBar.style.width = `${(elixir / maxElixir) * 100}%`;
+}
+
+function toggleSelect(name) {
+  if (selectedUnitToPlace?.type === name || selectedSpell === name) {
+    selectedUnitToPlace = null;
+    selectedSpell = null;
+    placementPreview.style.display = "none";
+    game.style.cursor = "default";
+    updateSelectionHighlights();
+    return;
+  }
+
+  if (UNIT_TYPES[name]) {
+    selectedUnitToPlace = { type: name };
+    selectedSpell = null;
+    placementPreview.style.backgroundImage = `url(${UNIT_TYPES[name].sprite})`;
+    placementPreview.style.display = "block";
+    game.style.cursor = "crosshair";
+  } else if (SPELLS[name]) {
+    selectedSpell = name;
+    selectedUnitToPlace = null;
+    placementPreview.style.display = "none";
+    game.style.cursor = "crosshair";
+  }
+  updateSelectionHighlights();
+}
+
+function updateSelectionHighlights() {
+  for (const key in buttons) {
+    if ((selectedUnitToPlace && selectedUnitToPlace.type === key) || selectedSpell === key) {
+      buttons[key].classList.add("selected");
+    } else {
+      buttons[key].classList.remove("selected");
+    }
+  }
+}
+
+function triggerCooldown(name, cooldown) {
+  cooldowns[name] = performance.now() + cooldown;
+  buttons[name].classList.add("cooldown");
+  buttons[name].disabled = true;
+  updateCooldownVisual(name);
+}
+
+function updateCooldownVisual(name) {
+  const now = performance.now();
+  const end = cooldowns[name];
+  if (end && end > now) {
+    const remaining = end - now;
+    const total = (UNIT_TYPES[name]?.cooldown || SPELLS[name]?.cooldown) || 3000;
+    const ratio = Math.min(1, remaining / total);
+    cooldownOverlays[name].style.width = (ratio * 100) + "%";
+  } else {
+    cooldownOverlays[name].style.width = "0%";
+    buttons[name].classList.remove("cooldown");
+    buttons[name].disabled = false;
+  }
+}
+
+function applySpell(spellName, x, y) {
+  const spell = SPELLS[spellName];
+  if (!spell) return;
+
+  // Create visual effect
+  const effect = document.createElement("div");
+  effect.className = "spell-effect " + spellName;
+  effect.style.left = (x - 40) + "px";
+  effect.style.top = (y - 40) + "px";
+  game.appendChild(effect);
+  setTimeout(() => effect.remove(), 1000);
+
+  // Apply spell effect on units within radius
+  for (const unit of units) {
+    if (unit.dying) continue;
+    const dx = unit.x - x;
+    const dy = unit.y - y;
+    if (Math.sqrt(dx * dx + dy * dy) <= spell.radius) {
+      if (spellName === "fireball") {
+        unit.hp -= spell.damage;
+        flashHit(unit.el);
+        if (unit.hp <= 0) {
+          killUnit(unit);
+        }
+      } else if (spellName === "freeze") {
+        unit.frozenUntil = performance.now() + spell.duration;
+        unit.el.style.filter = "brightness(1.5) drop-shadow(0 0 6px cyan)";
+        setTimeout(() => {
+          unit.el.style.filter = "";
+        }, spell.duration);
+      }
+    }
+  }
+
+  // Apply spell effect on towers within radius
+  for (const tower of towers) {
+    const dx = tower.x + 30 - x;
+    const dy = tower.y + 15 - y;
+    if (Math.sqrt(dx * dx + dy * dy) <= spell.radius) {
+      if (spellName === "fireball") {
+        tower.hp -= spell.damage;
+        flashHit(tower.el);
+        if (tower.hp <= 0) {
+          tower.hp = 0;
+          tower.el.style.background = "darkred";
+        }
+        updateTowerHealth(tower);
+      }
+      // Freeze effect on towers can be added here if desired
+    }
+  }
+}
+
+function flashHit(element) {
+  if (!element) return;
+  element.style.transition = "background-color 0.1s";
+  element.style.backgroundColor = "rgba(255, 255, 255, 0.7)";
+  setTimeout(() => {
+    element.style.backgroundColor = "";
+  }, 100);
+}
+
+function killUnit(unit) {
+  if (unit.dying) return;
+  unit.dying = true;
+  unit.el.classList.add("dying");
+  setTimeout(() => {
+    unit.wrapper.remove();
+    units.splice(units.indexOf(unit), 1);
+  }, 800);
+}
+
+function updateTowerHealth(tower) {
+  tower.healthBar.style.width = (tower.hp) + "%";
+}
+
+function gameLoop() {
+  const now = performance.now();
+
+  for (const key in cooldowns) {
+    updateCooldownVisual(key);
+  }
+
+  if (elixir < maxElixir) {
+    elixir += 0.002;
+    if (elixir > maxElixir) elixir = maxElixir;
+    updateElixirBar();
+  }
+
+  for (const unit of units) {
+    if (unit.dying) continue;
+    if (unit.frozenUntil > now) continue;
+
+    // Move unit
+    unit.y += unit.speed;
+    unit.wrapper.style.top = unit.y + "px";
+
+    // Attack logic
+    let attacked = false;
+    for (const other of units) {
+      if (other === unit || other.dying) continue;
+      if (unit.isEnemy === other.isEnemy) continue;
+      if (unit.lane !== other.lane) continue;
+
+      const dist = Math.abs(other.y - unit.y);
+      if (dist < 30) {
+        // Attack animation trigger once per ~500ms
+        if (now - unit.lastAttackTime > 500) {
+          unit.el.classList.add("attacking");
+          setTimeout(() => unit.el.classList.remove("attacking"), 150);
+          unit.lastAttackTime = now;
+        }
+        other.hp -= unit.damage;
+        flashHit(other.el);
+        if (other.hp <= 0) killUnit(other);
+        attacked = true;
+        break;
+      }
+    }
+    if (attacked) continue;
+
+    // Attack towers in lane
+    for (const tower of towers) {
+      if (tower.isEnemy === unit.isEnemy) continue;
+      if (unit.lane === (tower.x < 120 ? 0 : 1)) {
+        const towerY = tower.y + 15;
+        const dist = Math.abs(unit.y - towerY);
+        if (dist < 40) {
+          if (now - unit.lastAttackTime > 500) {
+            unit.el.classList.add("attacking");
+            setTimeout(() => unit.el.classList.remove("attacking"), 150);
+            unit.lastAttackTime = now;
+          }
+          tower.hp -= unit.damage;
+          flashHit(tower.el);
+          if (tower.hp <= 0) tower.hp = 0;
+          updateTowerHealth(tower);
+          attacked = true;
+          break;
+        }
+      }
+    }
+  }
+
+  for (const unit of units) {
+    unit.hpBar.style.width = (unit.hp / unit.maxHp) * 100 + "%";
+  }
+
+  requestAnimationFrame(gameLoop);
+}
+
+gameLoop();
+
+game.addEventListener("mousemove", e => {
+  if (selectedUnitToPlace) {
+    const rect = game.getBoundingClientRect();
+    let x = e.clientX - rect.left - 16;
+    let y = e.clientY - rect.top - 16;
+
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
+    if (x > game.clientWidth - 32) x = game.clientWidth - 32;
+    if (y > game.clientHeight - 32) y = game.clientHeight - 32;
+
+    placementPreview.style.left = x + "px";
+    placementPreview.style.top = y + "px";
+  }
+});
+
+game.addEventListener("click", e => {
+  const rect = game.getBoundingClientRect();
+  const x = e.clientX - rect.left;
+  const y = e.clientY - rect.top;
+
+  if (selectedUnitToPlace) {
+    const unitType = selectedUnitToPlace.type;
+    const unitDef = UNIT_TYPES[unitType];
+
+    if (cooldowns[unitType] > performance.now()) return;
+    if (elixir < unitDef.cost) return;
+
+    let laneIndex = x < 120 ? 0 : 1;
+
+    spawnUnit(laneIndex, unitType, false);
+    elixir -= unitDef.cost;
+    updateElixirBar();
+    triggerCooldown(unitType, unitDef.cooldown);
+
+    selectedUnitToPlace = null;
+    placementPreview.style.display = "none";
+    game.style.cursor = "default";
+    updateSelectionHighlights();
+
+  } else if (selectedSpell) {
+    if (cooldowns[selectedSpell] > performance.now()) return;
+    if (elixir < SPELLS[selectedSpell].cost) return;
+
+    applySpell(selectedSpell, x, y);
+    elixir -= SPELLS[selectedSpell].cost;
+    updateElixirBar();
+    triggerCooldown(selectedSpell, SPELLS[selectedSpell].cooldown);
+
+    selectedSpell = null;
+    placementPreview.style.display = "none";
+    game.style.cursor = "default";
+    updateSelectionHighlights();
+  }
+});
+
+// CSS additions for animations and spell effects:
+const style = document.createElement('style');
+style.textContent = `
+  .unit.attacking {
+    animation: attack-shake 0.15s ease-in-out;
+  }
+  @keyframes attack-shake {
+    0% { transform: translateX(0); }
+    25% { transform: translateX(-5px); }
+    50% { transform: translateX(5px); }
+    75% { transform: translateX(-5px); }
+    100% { transform: translateX(0); }
+  }
+  .spell-effect.fireball {
+    position: absolute;
+    width: 80px;
+    height: 80px;
+    border-radius: 50%;
+    background: radial-gradient(circle, rgba(255,80,0,0.8) 0%, rgba(255,0,0,0) 70%);
+    animation: spell-fireball 0.8s forwards;
+    pointer-events: none;
+  }
+  .spell-effect.freeze {
+    position: absolute;
+    width: 80px;
+    height: 80px;
+    border-radius: 50%;
+    background: radial-gradient(circle, rgba(0,200,255,0.7) 0%, rgba(0,150,255,0) 80%);
+    animation: spell-freeze 1s forwards;
+    pointer-events: none;
+  }
+  @keyframes spell-fireball {
+    0% { transform: scale(0.3); opacity: 1; }
+    100% { transform: scale(1.2); opacity: 0; }
+  }
+  @keyframes spell-freeze {
+    0% { transform: scale(0.5); opacity: 0.7; }
+    100% { transform: scale(1.5); opacity: 0; }
+  }
+`;
+document.head.appendChild(style);
+
+buttons.tank.onclick = () => toggleSelect("tank");
+buttons.knight.onclick = () => toggleSelect("knight");
+buttons.archer.onclick = () => toggleSelect("archer");
+buttons.fireball.onclick = () => toggleSelect("fireball");
+buttons.freeze.onclick = () => toggleSelect("freeze");
+
+updateElixirBar();
+for (const key in cooldowns) {
+  cooldownOverlays[key].style.width = "0%";
+}
+</script>
